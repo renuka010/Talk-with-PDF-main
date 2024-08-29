@@ -1,0 +1,20 @@
+langchain
+langchain-community
+langchain-ollama
+langchain-chroma>=0.1.2
+PyPDF2
+python-dotenv
+streamlit
+openai
+faiss-cpu
+altair
+tiktoken
+matplotlib
+pycryptodome==3.15.0
+sentence-transformers
+# uncomment to use huggingface llms
+# huggingface-hub==0.14.1
+
+# uncomment to use instructor embeddings
+# InstructorEmbedding==1.0.1
+# sentence-transformers==2.2.2

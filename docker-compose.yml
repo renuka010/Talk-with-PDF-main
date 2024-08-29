@@ -1,0 +1,10 @@
+version: '3'
+
+services:
+  pdf_bot:
+    container_name: Talk-with-PDF
+    build: .
+    environment:
+      - HUGGINGFACEHUB_API_TOKEN=
+    ports:
+      - "1010:8501"
