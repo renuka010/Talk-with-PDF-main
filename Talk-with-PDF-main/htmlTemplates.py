@@ -52,7 +52,7 @@ bot_template = '''
     <div class="avatar">
         <img src="https://pub-f858c7e521464395920779af297fb1bd.r2.dev/TalkWithPFD-icon.png" style="max-height: 55px; max-width: 55px; border-radius: 20%; object-fit: cover;">
     </div>
-    <div class="message">{{MSG}}</div>
+    <div class="message">{MSG}</div>
 </div>
 '''
 
@@ -61,7 +61,7 @@ user_template = '''
     <div class="avatar">
         <img src="https://i.postimg.cc/CMNHdfv3/account-icon-25499.png" style="max-height: 45px; max-width: 45px; border-radius: 20%; object-fit: cover;">
     </div>    
-    <div class="message">{{MSG}}</div>
+    <div class="message">{MSG}</div>
 </div>
 '''
 

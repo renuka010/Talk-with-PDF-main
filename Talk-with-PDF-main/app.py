@@ -6,6 +6,10 @@ from langchain_community.embeddings.sentence_transformer import (
 )
 import uuid
 import chromadb
+import json
+import csv
+import ast
+import pandas as pd
 from langchain_community.chat_models import ChatOllama
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_chroma import Chroma
@@ -31,7 +35,7 @@ def get_pdf_text(pdf_docs):
 def get_text_chunks(text):
     text_splitter = CharacterTextSplitter(
         separator="\n",
-        chunk_size=1000,
+        chunk_size=1024,
         chunk_overlap=200,
         length_function=len
     )
@@ -47,13 +51,21 @@ def get_vectorstore(pdf_docs):
 
     embeddings = SentenceTransformerEmbeddings(model_name="all-mpnet-base-v2")
     persistent_client = chromadb.PersistentClient()
+    # try:
+    #     collection = persistent_client.get_collection("nsdc")
+    #     print("collection is retrived")
+    # except:
+    #     collection = persistent_client.create_collection("nsdc")
+    #     print("collection is created")
+    #     new_collection = True
+
     try:
-        collection = persistent_client.get_collection("nsdc")
-        print("collection is retrived")
-    except:
-        collection = persistent_client.create_collection("nsdc")
-        print("collection is created")
-        new_collection = True
+        persistent_client.delete_collection("nsdc")
+    except Exception as e:
+        pass
+    collection = persistent_client.create_collection("nsdc")
+    print("collection is created")
+    new_collection = True
 
     vectorstore =Chroma(
         collection_name="nsdc",
@@ -82,7 +94,8 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 
 def get_conversation_chain(vector_store):
     # Initializing LLM Model
-    llm = ChatOllama(base_url='http://host.docker.internal:11434', model="phi3", format="text", temperature=0.7, keep_alive=-1)
+    # base_url='http://host.docker.internal:11434'
+    llm = ChatOllama(model="llama3.1", format="text", temperature=0.3, keep_alive=-1)
 
     retriever = vector_store.as_retriever(k=5)
 
@@ -103,25 +116,81 @@ def get_conversation_chain(vector_store):
     )
 
     ### Answer question ###
-    qa_system_prompt = """You are an assistant for question answer tasks. 
-        Use the following pieces of retrieved context to answer the question. \
-        If the context doesn't have relavant information to answer the question, say, \n\n
-        Sorry, I am not having relavant information to answer the question." \n. 
-        Keep the answer concise. \n\n
-        Example of an 'question' and 'answer':\
-        -----------------------\n \
-            Question: What is MSDE's vision for 2025? \n
-            Answer: MSDE’s Vision 2025 aims to transition India to a high-skills equilibrium, fostering... \n
-                    source: Gen_FAQ_Annex \n\n
-        context:\
-        -------- \n   {context}"""
+    qa_system_prompt = """You are an AI assistant that can help the user with a variety of tasks.\
+    You have access to the following functions: \
+    Use the function "create_csv" to "Get csv link from the given python lists":\
+    {tools}\
+    
+    When the user asks you a question, if you need to use tool, provide ONLY the function call in the format: \
+    {function_call_format} \
+    
+    For example to create a csv as below,\n\
+    Eligibility, PMKK scheme \n\
+    Nationality, Indian \n\
+    ID Proof, voter's ID or Aadhaar card or bank account \n\
+    Age, 15 to 45 \n\
+    Employment, Unemployed/school or college dropout \n\
+
+    Your function call should be as below. \n\
+    {{"function": "create_csv", "columns": [["Eligibility", "Nationality", "ID Proof", "Age", "Employment"],
+    ["PMKK scheme", "Indian", "voter's ID or Aadhaar card or bank account", "15 to 45", "Unemployed/school or college dropout"]]}}
+    
+    Example of question and answers: \n\
+        Question: What is eligibility of PMKK scheme? give me in csv format \n\
+        Answer: {{"function": "create_csv", "columns": [["Eligibility", "Nationality", "ID Proof", "Age", "Employment"],
+    ["PMKK Scheme", "Indian", "voter's ID or Aadhaar card or bank account", "15 to 45", "Unemployed/school or college dropout"]]}}\n\n\
+
+        Question: What is eligibility of PMKK scheme? \n\
+        Answer: To be eligible for the Pradhan Mantri Kaushal Vikas Yojana (PMKVY), or Pradhan Mantri Kaushal Kendra (PMKK), you must meet the following criteria: \
+            - Be an Indian national \
+            - Have a valid identity proof, such as a voter's ID, Aadhaar card, or bank account \
+            - Be unemployed or have dropped out of school or college \
+            - Be between the ages of 15 and 45 \
+            - Fulfill the eligibility criteria for the job role you're applying for \n\n\
+        
+    
+    Reminder:\n\
+    - Function calls MUST follow the specified format, start with <function= and end with </function>\
+    - Required parameters MUST be specified\
+    - Function call parameters should be from the context only.
+    - Only call one function at a time\
+    - Put the entire function call reply on one line\
+    - Use double quotes for string in function call.
+    - If there is no function call available, answer the question like normal from the context provided without function call.\
+    - DO NOT CALL THE FUNCTION IF THE USER DID NOT ASK CSV FILE.\
+    - DO NOT TELL THE USER ABOUT FUNCTION CALLS.\
+    - DO NOT TELL USER YOU CAN CREATE CSV IF USER DID NOT ASK.\
+    - Keep the answer concise.\
+    - If the provided context does'nt have relavant information to answer the question, say 'I DON'T KNOW'.\
+    - DO NOT ANSWER THE QUESTION IF THE CONTEXT DON'T HAVE RELAVANT INFORMATION.\
+        
+    - IMPORTANT - CALL THE FUNCTION ONLY IF USER ASKS FOR A CSV. \n\n\
+
+    context:\n\
+    -------- \n\
+    {context}"""
+    tools = """{
+            "name": "create_csv",
+            "description": "Get csv link from the given python lists",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "columns":{
+                        "type": "List[List[string]]",
+                        "description": "A python list of lists where each inner list contains column name and values to fill for each column that are used to create a csv file"
+                    }
+                }
+                "required": ["columns"],
+            },
+        }"""
+    function_call_format = """{"function": "create_csv", "example_name": "example_value"}"""
     qa_prompt = ChatPromptTemplate.from_messages(
         [
             ("system", qa_system_prompt),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ]
-    )
+    ).partial(tools=tools, function_call_format=function_call_format)
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
@@ -135,6 +204,25 @@ def get_conversation_chain(vector_store):
     )
     return conversational_rag_chain
 
+def is_csv(response: str):
+    return True if response.startswith('{"function":') else False
+
+def create_csv(response: str):
+    try:
+        json_data = response.strip('{}')
+        print(f'Json data:>>>>>>>{json_data}')
+        parsed_data = json.loads(f'{{{json_data}}}')
+        print(f'Pasered data:>>>>>>>{parsed_data}')
+        columns = parsed_data['columns']
+        print(type(columns))
+        csv_file_name = 'output.csv'
+        df = pd.DataFrame(columns).transpose()
+        df.to_csv(csv_file_name, header=False, index=False)
+        print("csv file created successfully")
+        return f"I have created the requested details as csv. To download use the link {csv_file_name}"
+    except Exception as e:
+        print(e)
+        return "Sorry, I am unable to generate csv currently."
 
 def handle_userinput(query):
     if st.session_state.conversation is None:
@@ -146,20 +234,19 @@ def handle_userinput(query):
         config={"configurable": {"session_id": "abc123"}},
     )
     print(response)
+    ai_response = response["answer"]
+    if (is_csv(ai_response)):
+        ai_response = create_csv(ai_response)
     
-    st.session_state.chat_history = response['chat_history']
+    st.session_state.chat_history.append(query)
+    st.session_state.chat_history.append(ai_response)
     for i, message in enumerate(st.session_state.chat_history):
         if i % 2 == 0:
             st.write(user_template.replace(
-                "{{MSG}}", message.content), unsafe_allow_html=True)
+                "{MSG}", message), unsafe_allow_html=True)
         else:
             st.write(bot_template.replace(
-                "{{MSG}}", message.content), unsafe_allow_html=True)
-            
-    st.write(user_template.replace(
-                "{{MSG}}", query), unsafe_allow_html=True)
-    st.write(bot_template.replace(
-                "{{MSG}}", response["answer"]), unsafe_allow_html=True)
+                "{MSG}", message), unsafe_allow_html=True)
 
 
 def main():
@@ -170,7 +257,7 @@ def main():
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None
+        st.session_state.chat_history = []
 
     st.header("Chat with AI with Custom Data 🚀")
     user_question = st.chat_input("Ask a question about your Data:")
