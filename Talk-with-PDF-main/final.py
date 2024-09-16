@@ -17,7 +17,9 @@ from langchain.chains import create_history_aware_retriever, create_retrieval_ch
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_community.chat_models import ChatOllama
@@ -47,41 +49,43 @@ def get_chunks(pdf_docs):
                 page_num = match.group(2).strip()
                 contents.append((title,page_num))
 
-        # Fetch titles and context
         documents: List[Tuple] = []
+        if contents:
+            for i in range(len(contents)):
+                title = contents[i][0]
+                start_page = contents[i][1]
+                
+                if i == len(contents)-1:
+                    next_title = ""
+                    end_page = doc.page_count-1
+                else:
+                    next_title = contents[i+1][0]
+                    end_page = contents[i+1][1]
 
-        for i in range(len(contents)):
+                pages = [j for j in range(int(start_page), int(end_page)+1)]
+                md_text = pymupdf4llm.to_markdown(doc, pages= pages)
 
-            title = contents[i][0]
-            start_page = contents[i][1]
-            
-            if i == len(contents)-1:
-                next_title = ""
-                end_page = doc.page_count-1
-            else:
-                next_title = contents[i+1][0]
-                end_page = contents[i+1][1]
+                cleaned_content = '\n'.join(md_text.split("\n\n"))
+                pattern = re.compile(r'\d+\n\n-{5}\n')
+                cleaned_content = re.sub(pattern, "", cleaned_content)
 
-            pages = [j for j in range(int(start_page), int(end_page)+1)]
-            md_text = pymupdf4llm.to_markdown(doc, pages= pages)
+                pattern_with_next_title = re.compile(rf'({re.escape(title)})(.*?)(?={re.escape(next_title)})', re.IGNORECASE | re.DOTALL)
+                pattern_without_next_title = re.compile(rf'({re.escape(title)})(.*)', re.IGNORECASE | re.DOTALL)
 
+                match = pattern_with_next_title.search(cleaned_content)
+                if not match:
+                    match = pattern_without_next_title.search(cleaned_content)
+                
+                if match:
+                    final_content = match.group(1) + match.group(2)
+                    documents.append((title, final_content))
+                else:
+                    print(f"No Match for title {title}")
+        else:
             cleaned_content = '\n'.join(md_text.split("\n\n"))
             pattern = re.compile(r'\d+\n\n-{5}\n')
             cleaned_content = re.sub(pattern, "", cleaned_content)
-
-            pattern_with_next_title = re.compile(rf'({re.escape(title)})(.*?)(?={re.escape(next_title)})', re.IGNORECASE | re.DOTALL)
-            pattern_without_next_title = re.compile(rf'({re.escape(title)})(.*)', re.IGNORECASE | re.DOTALL)
-
-            match = pattern_with_next_title.search(cleaned_content)
-            if not match:
-                match = pattern_without_next_title.search(cleaned_content)
-            
-            if match:
-                final_content = match.group(1) + match.group(2)
-                documents.append((title, final_content))
-            else:
-                print(f"No Match for title {title}")
-
+            documents.append(("", cleaned_content))
         # Split Documents
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1024, 
@@ -135,7 +139,17 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     store = st.session_state.store
     if session_id not in store:
         store[session_id] = ChatMessageHistory()
+
+    if len(store[session_id].messages) > 4:
+            store[session_id].messages = store[session_id].messages[-4:]
+
+    print("Store history", store[session_id])
+
     return store[session_id]
+
+def update_chat_history(session_id: str, query, response):
+    st.session_state.store[session_id].add_user_message(query)
+    st.session_state.store[session_id].add_ai_message(response)
 
 def get_conversation_chain(vector_store):
     # base_url='http://host.docker.internal:11434'
@@ -185,7 +199,43 @@ def get_conversation_chain(vector_store):
         ]
     )
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+    def retrieve_and_check_context(inputs):
+        print(inputs)
+        question = inputs["input"]
+        chat_history = inputs["chat_history"]
+        
+        # Use the history_aware_retriever to get context
+        context = history_aware_retriever.invoke({"input": question, "chat_history": chat_history})
+        
+        if not context:  # If no relevant context is retrieved
+            return {
+                "context": "",
+                "input": question,
+                "chat_history": chat_history,
+                "no_context": True
+            }
+        else:
+            return {
+                "context": context,
+                "input": question,
+                "chat_history": chat_history,
+                "no_context": False
+            }
+
+    def answer_or_apologize(inputs):
+        print(inputs,"\n\n")
+        if inputs["no_context"]:
+            return "Sorry, I don't have relevant information to answer that question."
+        else:
+            return question_answer_chain.invoke(inputs)
+
+    rag_chain = (
+        RunnablePassthrough()
+        | retrieve_and_check_context
+        | answer_or_apologize
+    )
+    
     conversational_rag_chain = RunnableWithMessageHistory(
         rag_chain,
         get_session_history,
@@ -200,12 +250,15 @@ def handle_userinput(query):
         st.error("Please upload PDF data before starting the chat.")
         return
     session_id = os.environ["SESSION_ID"]
+
     response = st.session_state.conversation.invoke(
         {"input": query},
         config={"configurable": {"session_id": session_id}},
     )
-    print(response)
-    ai_response = response["answer"]
+    print(f'Response ---> {response}')
+    ai_response = response
+
+    update_chat_history(session_id, query, ai_response)
     
     st.session_state.chat_history.append(query)
     st.session_state.chat_history.append(ai_response)
